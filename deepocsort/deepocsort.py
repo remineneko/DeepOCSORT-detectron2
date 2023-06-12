@@ -472,44 +472,28 @@ class DeepOCSortTracker(BaseTracker):
         Returns:
             Instances: _description_
         """
-        instances = self._initialize_extra_fields(instances)
+        instances = self._initialize_fields(instances)
         if self._prev_instances:
-            # to be fair, this doesn't matter... though I would love to try and incorporate this to modify this function.
-            # mostly because mikel's implementation already stores the tracks in the tracker, which renders this almost redundant.
-            # then again, i could be wrong.
-            # TODO: after the base base version is completed, come back to this.
-            self._untracked_prev_idx = set(range(len(self._prev_instances)))
-            
-            # Basically, if I understand this correctly
-            # now we have two things to deal with - the current instances extracted
-            # and the old untracked ids.
-
-            # if so, one solution would be to deal with them sequentially, no?
-            # deal with the current ones first, then the ones that havent been dealt with
-
-            # However, first things first - we extract what the current instances yield:
             boxes: Boxes = instances.pred_boxes
             scores: torch.Tensor = instances.scores
             classes: torch.Tensor = instances.classes
-            ids: torch.Tensor = instances.ID
 
             n_boxes = boxes.tensor.numpy()
             n_scores = scores.numpy()
             n_classes = classes.numpy()
-            n_ids = ids.numpy()
 
             # filter out tracks that doesn't meet the min threshold.
             filtered_indices = n_scores > self.det_thresh
+            n_indices = np.where(filtered_indices)[0]
             n_boxes = n_boxes[filtered_indices]
             n_scores = n_scores[filtered_indices]
             n_classes = n_classes[filtered_indices]
-            n_ids = n_ids[filtered_indices]
 
             # a terrible hack to see if it works with mikel's code from yours truly
             # this is to handle the second round of association by OCR
             # though I could force another concat to make it the same as the original implementation by mikel,
             # I think this no-more-concat approach would be more readable.
-            dets = np.concatenate((n_boxes, n_scores.T), axis = 1)
+            dets = np.concatenate((n_boxes, n_scores.T), axis = 0)
 
             # Embedding
             if self.embedding_off or n_boxes.shape[0] == 0:
@@ -562,8 +546,9 @@ class DeepOCSortTracker(BaseTracker):
                 stage1_emb_cost = None
             else:
                 stage1_emb_cost = boxes_embeds @ trk_embs.T
-            matched, unmatched_dets, unmatched_trks = associate(
+            matched_with_ind, unmatched_dets_with_ind, unmatched_trks_with_ind = associate(
                 n_boxes,
+                n_indices,
                 trks,
                 self.iou_threshold,
                 velocities,
@@ -575,10 +560,19 @@ class DeepOCSortTracker(BaseTracker):
                 self.aw_param,
             )
             
-            for m in matched:
+            matched, matched_ind = matched_with_ind
+            unmatched_dets, unmatched_dets_ind = unmatched_dets_with_ind
+            # for discovering the index later
+            unmatched_dets_copy = deepcopy(unmatched_dets)
+            unmatched_trks, unmatched_trks_ind = unmatched_trks_with_ind
+            # similar idea, if applicable.
+            unmatched_trks_copy = deepcopy(unmatched_trks)
+
+            for ind, m in enumerate(matched):
                 self.trackers[m[1]].update(n_classes[m[0]], n_classes[m[0]])
                 self.trackers[m[1]].update_emb(boxes_embeds[m[0]], alpha=detects_alpha[m[0]])
-
+                instances.ID[matched_ind[ind]] = self._prev_instances[matched_ind[ind]]
+                
             """
                 Second round of associaton by OCR
             """
@@ -596,11 +590,6 @@ class DeepOCSortTracker(BaseTracker):
                     emb_cost_left = np.zeros_like(emb_cost_left)
                 iou_left = np.array(iou_left)
                 if iou_left.max() > self.iou_threshold:
-                    """
-                    NOTE: by using a lower threshold, e.g., self.iou_threshold - 0.1, you may
-                    get a higher performance especially on MOT17/MOT20 datasets. But we keep it
-                    uniform here for simplicity
-                    """
                     rematched_indices = linear_assignment(-iou_left)
                     to_remove_det_indices = []
                     to_remove_trk_indices = []
@@ -619,21 +608,20 @@ class DeepOCSortTracker(BaseTracker):
             for m in unmatched_trks:
                 self.trackers[m].update(None, None)
 
-            # create and initialise new trackers for unmatched detections
+            # create and initialize new trackers for unmatched detections
             for i in unmatched_dets:
                 trk = KalmanBoxTracker(
                     dets[i, :5], n_classes[i], delta_t=self.delta_t, emb=boxes_embeds[i], alpha=detects_alpha[i], new_kf=not self.new_kf_off
                 )
                 self.trackers.append(trk)
+                instances.ID[unmatched_trks_ind[np.where(unmatched_trks_copy == m)]] = self._id_count
+                self._id_count += 1
+                
             i = len(self.trackers)
             for trk in reversed(self.trackers):
                 if trk.last_observation.sum() < 0:
                     d = trk.get_state()[0]
                 else:
-                    """
-                    this is optional to use the recent observation or the kalman filter prediction,
-                    we didn't notice significant difference here
-                    """
                     d = trk.last_observation[:4]
                 if (trk.time_since_update < 1) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
                     # +1 as MOT benchmark requires positive
@@ -645,15 +633,11 @@ class DeepOCSortTracker(BaseTracker):
             
             # now the remaining jobs are... hopefully simple.
             # assign the new values into instances?
-            instances.ID = torch.as_tensor(n_ids)
-            instances.pred_boxes = Boxes(torch.as_tensor(n_boxes))
-            instances.classes = torch.as_tensor(n_classes)
-            instances.scores = torch.as_tensor(n_scores)
 
         self._prev_instances = deepcopy(instances)
         return instances
 
-    def _initialize_extra_fields(self, instances: Instances) -> Instances:
+    def _initialize_fields(self, instances: Instances) -> Instances:
         """
         Per BaseTracker's update() function, Instances will have the following fields:
           .pred_boxes               (shape=[N, 4])
@@ -665,10 +649,7 @@ class DeepOCSortTracker(BaseTracker):
 
         with N being the number of detected bboxes, and H and W being the height and width, respectively, of 2D mask.
 
-        For this tracker, if the instances are missing 'pred_boxes', 'scores', 'pred_classes', and 'ID',
-        this function will create and initialize these fields.
-
-        Contrary to existing trackers in this repo, I don't think this needs 'ID_period' - Kalam
+        For this tracker, if the instances are missing 'ID', this function will create and initialize these fields.
 
         Args:
             instances (Instances): _description_
@@ -686,13 +667,7 @@ class DeepOCSortTracker(BaseTracker):
         #  - “pred_keypoints”: a Tensor of shape (N, num_keypoint, 3). Each row in the last dimension is (x, y, score). Confidence scores are larger than 0.
 
         if not instances.has("ID"):
-            instances.set("ID", np.zeros((len(instances),))) # shape=[N,]
-        if not instances.has("pred_boxes"):
-            instances.set("pred_boxes", Boxes(torch.as_tensor(np.zeros((len(instances), 4))))) # shape=[N,4]
-        if not instances.has("scores"):
-            instances.set("scores", torch.as_tensor(np.zeros((len(instances),)))) # shape=[N,]
-        if not instances.has('pred_classes'):
-            instances.set('pred_classes', torch.as_tensor(np.zeros((len(instances)), ))) # shape=[N,]
+            instances.set("ID", [None] * len(instances)) # shape=[N,]
         if not self._prev_instances:
             # this is supposed to handle the cases where no predictions are made.
             # to be honest, I am still unsure, so I'll do a first draft and see if it goes wrong
@@ -700,11 +675,8 @@ class DeepOCSortTracker(BaseTracker):
             
             # to be fair, I haven't entirely understand the whole... Instances shebang.
             # TODO: Read the models again, see how they actually work.
-            instances.ID = np.array(list(range(len(instances))))
+            instances.ID = list(range(len(instances)))
             self._id_count += len(instances)
-            instances.pred_boxes = Boxes(torch.as_tensor(np.zeros((len(instances), 4))))
-            instances.scores = torch.as_tensor(np.zeros((len(instances), )))
-            instances.pred_classes = torch.as_tensor(np.zeros((len(instances),)))
         return instances
 
     def _xywh_to_xyxy(self, bbox_xywh: np.ndarray):

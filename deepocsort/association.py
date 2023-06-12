@@ -289,7 +289,7 @@ def compute_aw_max_metric(emb_cost, w_association_emb, bottom=0.5):
 
 
 def associate(
-    detections, trackers, iou_threshold, velocities, previous_obs, vdc_weight, emb_cost, w_assoc_emb, aw_off, aw_param
+    detections, id_indices, trackers, iou_threshold, velocities, previous_obs, vdc_weight, emb_cost, w_assoc_emb, aw_off, aw_param
 ):
     if len(trackers) == 0:
         return (
@@ -342,20 +342,20 @@ def associate(
     unmatched_detections = []
     for d, det in enumerate(detections):
         if d not in matched_indices[:, 0]:
-            unmatched_detections.append(d)
+            unmatched_detections.append((d, id_indices[d]))
     unmatched_trackers = []
     for t, trk in enumerate(trackers):
         if t not in matched_indices[:, 1]:
-            unmatched_trackers.append(t)
+            unmatched_trackers.append((t, id_indices[t]))
 
     # filter out matched with low IOU
     matches = []
-    for m in matched_indices:
+    for ind, m in enumerate(matched_indices):
         if iou_matrix[m[0], m[1]] < iou_threshold:
-            unmatched_detections.append(m[0])
-            unmatched_trackers.append(m[1])
+            unmatched_detections.append((m[0], id_indices[ind]))
+            unmatched_trackers.append((m[1], id_indices[ind]))
         else:
-            matches.append(m.reshape(1, 2))
+            matches.append((m.reshape(1, 2), id_indices[ind]))
     if len(matches) == 0:
         matches = np.empty((0, 2), dtype=int)
     else:
