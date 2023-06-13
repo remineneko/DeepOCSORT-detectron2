@@ -614,7 +614,7 @@ class DeepOCSortTracker(BaseTracker):
                     dets[i, :5], n_classes[i], delta_t=self.delta_t, emb=boxes_embeds[i], alpha=detects_alpha[i], new_kf=not self.new_kf_off
                 )
                 self.trackers.append(trk)
-                instances.ID[unmatched_trks_ind[np.where(unmatched_trks_copy == m)]] = self._id_count
+                instances.ID[unmatched_dets_ind[np.where(unmatched_dets_copy == m)]] = self._id_count
                 self._id_count += 1
                 
             i = len(self.trackers)
@@ -629,11 +629,7 @@ class DeepOCSortTracker(BaseTracker):
                 i -= 1
                 # remove dead tracklet
                 if trk.time_since_update > self.max_age:
-                    self.trackers.pop(i) 
-            
-            # now the remaining jobs are... hopefully simple.
-            # assign the new values into instances?
-
+                    self.trackers.pop(i)
         self._prev_instances = deepcopy(instances)
         return instances
 
