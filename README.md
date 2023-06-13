@@ -15,6 +15,7 @@ then this repo can be used normally for video inference, similar to how [video i
 Current plans:
 
 [ ] Identify remaining bugs and issues while updating Instances.
+
 [ ] Write a test suite for this tracker. 
 
 
