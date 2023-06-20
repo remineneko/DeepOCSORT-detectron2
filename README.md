@@ -16,6 +16,6 @@ Current plans:
 
 - [ ] Identify remaining bugs and issues while updating Instances.
 
-- [ ] Write a test suite for this tracker. 
+- [x] Write a test suite for this tracker. 
 
 
