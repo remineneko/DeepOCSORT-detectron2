@@ -426,7 +426,7 @@ class DeepOCSortTracker(BaseTracker):
         new_kf_off = cfg.TRACKER_HEADS.get('NEW_KF_OFF', False)
 
         return {
-            "_target_": "detectron2.tracking.deepocsort.DeepOCSORT",
+            "_target_": "deepocsort.deepocsort.DeepOCSORT",
             "model_weights": model_weights,
             "device": device,
             "fp16": fp16,
