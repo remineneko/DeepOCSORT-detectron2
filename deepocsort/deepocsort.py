@@ -1,11 +1,11 @@
-from detectron2.detectron2.config.config import CfgNode
+from detectron2.config.config import CfgNode
 
 from .constants import WEIGHTS_FOLDER
 
-from detectron2.detectron2.tracking.base_tracker import BaseTracker, TRACKER_HEADS_REGISTRY
+from detectron2.tracking.base_tracker import BaseTracker, TRACKER_HEADS_REGISTRY
 
-from detectron2.detectron2.config import configurable
-from detectron2.detectron2.structures import Instances, Boxes
+from detectron2.config import configurable
+from detectron2.structures import Instances, Boxes
 
 from typing import List
 import torch
@@ -426,7 +426,7 @@ class DeepOCSortTracker(BaseTracker):
         new_kf_off = cfg.TRACKER_HEADS.get('NEW_KF_OFF', False)
 
         return {
-            "_target_": "deepocsort.deepocsort.DeepOCSORT",
+            "_target_": "deepocsort.DeepOCSortTracker",
             "model_weights": model_weights,
             "device": device,
             "fp16": fp16,
@@ -476,7 +476,7 @@ class DeepOCSortTracker(BaseTracker):
         if self._prev_instances:
             boxes: Boxes = instances.pred_boxes
             scores: torch.Tensor = instances.scores
-            classes: torch.Tensor = instances.classes
+            classes: torch.Tensor = instances.pred_classes
 
             n_boxes = boxes.tensor.numpy()
             n_scores = scores.numpy()
@@ -493,7 +493,7 @@ class DeepOCSortTracker(BaseTracker):
             # this is to handle the second round of association by OCR
             # though I could force another concat to make it the same as the original implementation by mikel,
             # I think this no-more-concat approach would be more readable.
-            dets = np.concatenate((n_boxes, n_scores.T), axis = 0)
+            dets = np.hstack((n_boxes, n_scores.reshape((n_scores.shape[0], 1))))
 
             # Embedding
             if self.embedding_off or n_boxes.shape[0] == 0:
@@ -503,7 +503,7 @@ class DeepOCSortTracker(BaseTracker):
 
             # CMC
             if not self.cmc_off:
-                transform = self.cmc.compute_affine(self.img_feats, n_boxes, self.tag)
+                transform = self.cmc.compute_affine(self.img_feats, n_boxes, self.update_tag)
                 for tracker in self.trackers:
                     tracker.apply_affine_correction(transform)
             
@@ -546,7 +546,7 @@ class DeepOCSortTracker(BaseTracker):
                 stage1_emb_cost = None
             else:
                 stage1_emb_cost = boxes_embeds @ trk_embs.T
-            matched_with_ind, unmatched_dets_with_ind, unmatched_trks_with_ind = associate(
+            matched, unmatched_dets, unmatched_trks, matched_ind, unmatched_dets_ind, unmatched_trks_ind = associate(
                 n_boxes,
                 n_indices,
                 trks,
@@ -559,13 +559,7 @@ class DeepOCSortTracker(BaseTracker):
                 self.aw_off,
                 self.aw_param,
             )
-            
-            matched, matched_ind = matched_with_ind
-            unmatched_dets, unmatched_dets_ind = unmatched_dets_with_ind
-            # for discovering the index later
             unmatched_dets_copy = deepcopy(unmatched_dets)
-            unmatched_trks, unmatched_trks_ind = unmatched_trks_with_ind
-            # similar idea, if applicable.
             unmatched_trks_copy = deepcopy(unmatched_trks)
 
             for ind, m in enumerate(matched):
@@ -614,7 +608,7 @@ class DeepOCSortTracker(BaseTracker):
                     dets[i, :5], n_classes[i], delta_t=self.delta_t, emb=boxes_embeds[i], alpha=detects_alpha[i], new_kf=not self.new_kf_off
                 )
                 self.trackers.append(trk)
-                instances.ID[unmatched_dets_ind[np.where(unmatched_dets_copy == m)]] = self._id_count
+                instances.ID[unmatched_dets_ind[np.where(unmatched_dets_copy == i)][0]] = self._id_count
                 self._id_count += 1
                 
             i = len(self.trackers)
@@ -676,6 +670,7 @@ class DeepOCSortTracker(BaseTracker):
         return instances
 
     def _xywh_to_xyxy(self, bbox_xywh: np.ndarray):
+        self.height, self.width = self.img_feats.shape[:2]
         x, y, w, h = bbox_xywh
         x1 = max(int(x - w / 2), 0)
         x2 = min(int(x + w / 2), self.width - 1)
@@ -695,127 +690,6 @@ class DeepOCSortTracker(BaseTracker):
             features = np.array([])
         
         return features
-
-    def update_public(self, dets, cates, scores):
-        self.frame_count += 1
-
-        det_scores = np.ones((dets.shape[0], 1))
-        dets = np.concatenate((dets, det_scores), axis=1)
-
-        remain_inds = scores > self.det_thresh
-
-        cates = cates[remain_inds]
-        dets = dets[remain_inds]
-
-        trks = np.zeros((len(self.trackers), 5))
-        to_del = []
-        ret = []
-        for t, trk in enumerate(trks):
-            pos = self.trackers[t].predict()[0]
-            cat = self.trackers[t].cate
-            trk[:] = [pos[0], pos[1], pos[2], pos[3], cat]
-            if np.any(np.isnan(pos)):
-                to_del.append(t)
-        trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
-        for t in reversed(to_del):
-            self.trackers.pop(t)
-
-        velocities = np.array([trk.velocity if trk.velocity is not None else np.array((0, 0)) for trk in self.trackers])
-        last_boxes = np.array([trk.last_observation for trk in self.trackers])
-        k_observations = np.array([k_previous_obs(trk.observations, trk.age, self.delta_t) for trk in self.trackers])
-
-        matched, unmatched_dets, unmatched_trks = associate_kitti(
-            dets,
-            trks,
-            cates,
-            self.iou_threshold,
-            velocities,
-            k_observations,
-            self.inertia,
-        )
-
-        for m in matched:
-            self.trackers[m[1]].update(dets[m[0], :])
-
-        if unmatched_dets.shape[0] > 0 and unmatched_trks.shape[0] > 0:
-            """
-            The re-association stage by OCR.
-            NOTE: at this stage, adding other strategy might be able to continue improve
-            the performance, such as BYTE association by ByteTrack.
-            """
-            left_dets = dets[unmatched_dets]
-            left_trks = last_boxes[unmatched_trks]
-            left_dets_c = left_dets.copy()
-            left_trks_c = left_trks.copy()
-
-            iou_left = self.asso_func(left_dets_c, left_trks_c)
-            iou_left = np.array(iou_left)
-            det_cates_left = cates[unmatched_dets]
-            trk_cates_left = trks[unmatched_trks][:, 4]
-            num_dets = unmatched_dets.shape[0]
-            num_trks = unmatched_trks.shape[0]
-            cate_matrix = np.zeros((num_dets, num_trks))
-            for i in range(num_dets):
-                for j in range(num_trks):
-                    if det_cates_left[i] != trk_cates_left[j]:
-                        """
-                        For some datasets, such as KITTI, there are different categories,
-                        we have to avoid associate them together.
-                        """
-                        cate_matrix[i][j] = -1e6
-            iou_left = iou_left + cate_matrix
-            if iou_left.max() > self.iou_threshold - 0.1:
-                rematched_indices = linear_assignment(-iou_left)
-                to_remove_det_indices = []
-                to_remove_trk_indices = []
-                for m in rematched_indices:
-                    det_ind, trk_ind = unmatched_dets[m[0]], unmatched_trks[m[1]]
-                    if iou_left[m[0], m[1]] < self.iou_threshold - 0.1:
-                        continue
-                    self.trackers[trk_ind].update(dets[det_ind, :])
-                    to_remove_det_indices.append(det_ind)
-                    to_remove_trk_indices.append(trk_ind)
-                unmatched_dets = np.setdiff1d(unmatched_dets, np.array(to_remove_det_indices))
-                unmatched_trks = np.setdiff1d(unmatched_trks, np.array(to_remove_trk_indices))
-
-        for i in unmatched_dets:
-            trk = KalmanBoxTracker(dets[i, :])
-            trk.cate = cates[i]
-            self.trackers.append(trk)
-        i = len(self.trackers)
-
-        for trk in reversed(self.trackers):
-            if trk.last_observation.sum() > 0:
-                d = trk.last_observation[:4]
-            else:
-                d = trk.get_state()[0]
-            if trk.time_since_update < 1:
-                if (self.frame_count <= self.min_hits) or (trk.hit_streak >= self.min_hits):
-                    # id+1 as MOT benchmark requires positive
-                    ret.append(np.concatenate((d, [trk.id + 1], [trk.cls], [trk.conf])).reshape(1, -1))
-                if trk.hit_streak == self.min_hits:
-                    # Head Padding (HP): recover the lost steps during initializing the track
-                    for prev_i in range(self.min_hits - 1):
-                        prev_observation = trk.history_observations[-(prev_i + 2)]
-                        ret.append(
-                            (
-                                np.concatenate(
-                                    (
-                                        prev_observation[:4],
-                                        [trk.id + 1],
-                                        [trk.cls],
-                                        [trk.conf],
-                                    )
-                                )
-                            ).reshape(1, -1)
-                        )
-            i -= 1
-            if trk.time_since_update > self.max_age:
-                self.trackers.pop(i)
-
-        if len(ret) > 0:
-            return np.concatenate(ret)
-        return np.empty((0, 7))
 
     def dump_cache(self):
         self.cmc.dump_cache()

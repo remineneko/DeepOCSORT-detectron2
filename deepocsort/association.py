@@ -289,15 +289,17 @@ def compute_aw_max_metric(emb_cost, w_association_emb, bottom=0.5):
 
 
 def associate(
-    detections, id_indices, trackers, iou_threshold, velocities, previous_obs, vdc_weight, emb_cost, w_assoc_emb, aw_off, aw_param
+    detections, ind_indices, trackers, iou_threshold, velocities, previous_obs, vdc_weight, emb_cost, w_assoc_emb, aw_off, aw_param
 ):
     if len(trackers) == 0:
         return (
             np.empty((0, 2), dtype=int),
             np.arange(len(detections)),
             np.empty((0, 5), dtype=int),
+            np.empty((0, 1), dtype=int),
+            ind_indices,
+            np.empty((0, 1), dtype=int),
         )
-
     Y, X = speed_direction_batch(detections, previous_obs)
     inertia_Y, inertia_X = velocities[:, 0], velocities[:, 1]
     inertia_Y = np.repeat(inertia_Y[:, np.newaxis], Y.shape[1], axis=1)
@@ -340,28 +342,43 @@ def associate(
         matched_indices = np.empty(shape=(0, 2))
 
     unmatched_detections = []
+    unmatched_dets_inds = []
     for d, det in enumerate(detections):
         if d not in matched_indices[:, 0]:
-            unmatched_detections.append((d, id_indices[d]))
+            unmatched_detections.append(d)
+            unmatched_dets_inds.append(ind_indices[d])
     unmatched_trackers = []
+    unmatched_trks_inds = []
     for t, trk in enumerate(trackers):
         if t not in matched_indices[:, 1]:
-            unmatched_trackers.append((t, id_indices[t]))
+            unmatched_trackers.append(t)
+            unmatched_trks_inds.append(ind_indices[d])
 
     # filter out matched with low IOU
     matches = []
+    matches_inds = []
     for ind, m in enumerate(matched_indices):
         if iou_matrix[m[0], m[1]] < iou_threshold:
-            unmatched_detections.append((m[0], id_indices[ind]))
-            unmatched_trackers.append((m[1], id_indices[ind]))
+            unmatched_detections.append(m[0])
+            unmatched_dets_inds.append(ind_indices[ind])
+            unmatched_trackers.append(m[1])
+            unmatched_trks_inds.append(ind_indices[ind])
         else:
-            matches.append((m.reshape(1, 2), id_indices[ind]))
+            matches.append(m.reshape(1, 2))
+            matches_inds.append(ind_indices[ind])
     if len(matches) == 0:
         matches = np.empty((0, 2), dtype=int)
     else:
         matches = np.concatenate(matches, axis=0)
 
-    return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
+    return (
+        matches, 
+        np.array(unmatched_detections), 
+        np.array(unmatched_trackers),
+        np.array(matches_inds),
+        np.array(unmatched_dets_inds),
+        np.array(unmatched_trks_inds)
+    )
 
 
 def associate_kitti(detections, trackers, det_cates, iou_threshold, velocities, previous_obs, vdc_weight):
